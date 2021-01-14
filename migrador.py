@@ -7,9 +7,10 @@ import datetime
 import time
 import csv
 import os
+import pyodbc
 
 """
-        MIGRADOR GERAL PARA ORACLE E FIREBIRD PARA POSTGRESQL
+        MIGRADOR GERAL PARA ORACLE , MSSQL E FIREBIRD PARA POSTGRESQL
         PARA USAR BASTAR TER O BANCO DE ORIGEM RESTAURADO E SUAS CONFIGURACOES COLOCADAS CORRETAMENTE
                              O BANCO DE DESTINO CRIADO E SUAS CONFIGURACOES COLOCADAS CORRETAMENTE
 
@@ -28,14 +29,14 @@ class migrador_firebird:
     def __init__(self, tabela):
         # variaveis conexao banco de dados origem
         self.host_origem = 'localhost'
-        self.database_origem = 'C:/Users/dabes/Downloads/DBORIZANIA.FDB'
+        self.database_origem = 'C:/Users/dabes/Downloads/db.FDB'
         self.user_origem = 'SYSDBA'
-        self.senha_origem = 'masterkey'
+        self.senha_origem = 'senha'
         # variaves conexoes banco de dados destino
         self.user_destino = "postgres"
         self.senha_destino = "postgres"
         self.host_destino = "10.0.18.70"
-        self.database_destino = "teste_perf_mem2"
+        self.database_destino = "db"
         self.porta_destino = 5433
         self.erros = []
         self.current = 1
@@ -80,8 +81,8 @@ class migrador_firebird:
             count, = countsql.fetchall()[0]
             start_time = time.time()
             start_datetime = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            print "MIGRANDO: %s\n          NRO REGISTROS: %s registros\n          INICIO: %s" % (
-                row, count, start_datetime)
+            print("MIGRANDO: %s\n          NRO REGISTROS: %s registros\n          INICIO: %s" % (
+                row, count, start_datetime))
 
             # gera o create table e trunca a tabela ( se ja existir )
             create, tipos = self.ddl_table(row)
@@ -118,8 +119,8 @@ class migrador_firebird:
     def printa_erros(self):
         """ retorna os erros encontrados durante a migracao """
         for cada in self.erros:
-            print "%s\t%s\n--------------------------------------\n" % (
-                cada[0], cada[1])
+            print( "%s\t%s\n--------------------------------------\n" % (
+                cada[0], cada[1]))
 
     def ddl_table(self, tabela):
         """ gera o ddl (create table e tipos das colunas)"""
@@ -173,20 +174,176 @@ class migrador_firebird:
         return table, tipos
 
 
-class migrador_oracle:
+class migrador_mssql:
     def __init__(self, tabela):
         # dados da conexao de entrada
-        self.user_origem = "PMJ"
-        self.senha_origem = "PMJ"
+        self.user_origem = "sa"
+        self.senha_origem = "senha"
         self.host_origem = "localhost"
-        self.database_origem = "ORCL"
-        self.schema_origem = "PMJ"
+        self.database_origem = "db"
+        self.schema_origem = "dbo"
 
         # dados da conexao de saida
         self.user_destino = "postgres"
         self.senha_destino = "postgres"
         self.host_destino = "10.0.18.70"
-        self.database_destino = "joanesia"
+        self.database_destino = "db"
+        self.porta_destino = 5433
+
+        self.erros = []
+        # variaveis de configuracao
+        self.current = 0  # depreciada
+        self.offset = 10000  # quantidade de inserts por ves
+
+        # migra tabela especifica
+        self.tabela = tabela
+        if tabela != None:
+            self.filtro = " and table_name = '%s' " % tabela
+        else:
+            self.filtro = ""
+
+    def connect(self):
+        """ CONECTA AOS BANCOS DE ENTRADA E SAIDA"""
+        self.con_origem = pyodbc.connect("Driver={SQL Server Native Client 11.0};"
+                      "Server=%s;" 
+                      "Database=%s;"
+                      "UID=%s;"
+                      "PWD=%s;" %(self.host_origem,self.database_origem,self.user_origem,self.senha_origem))
+
+
+        self.con_destino = psycopg2.connect(
+            "user=%s password=%s host=%s port=%s dbname=%s" % (self.user_destino, self.senha_destino, self.host_destino, self.porta_destino, self.database_destino))
+
+        self.cur_origem = self.con_origem.cursor()
+        self.cur_destino = self.con_destino.cursor()
+
+        self.con_destino.autocommit = True
+
+    def migrar(self):
+        """  COPIA A(S) TABELA(S) PARA O BANCO DE SAIDA """
+        start = time.time()
+        if not os.path.exists('output'):
+            os.makedirs('output')
+        # seleciona as tabelas
+        res = self.cur_origem.execute(
+            "select table_name from INFORMATION_SCHEMA.tables where TABLE_SCHEMA = '%s' %s order by table_name;" % (self.schema_origem, self.filtro))
+
+        # para cada tabela
+        for row, in res.fetchall():
+            row = row.strip()
+            # conta os registros
+            countsql = self.cur_origem.execute(
+                "select count(*) as total from %s.%s " % (self.schema_origem,row))
+            count, = countsql.fetchall()[0]
+            start_time = time.time()
+            start_datetime = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            print("MIGRANDO: %s\n          NRO REGISTROS: %s registros\n          INICIO: %s" % (
+                row, count, start_datetime))
+
+            # gera o create table e trunca a tabela ( se ja existir )
+            create, tipos = self.ddl_table(row)
+            self.cur_destino.execute(create)
+            self.cur_destino.execute("TRUNCATE TABLE %s" % row)
+
+            # gera as colunas
+            cols = ""
+            for id, [col, tipo] in tipos.items():
+               cols += "%s," % col
+            # print( "select %s from %s.%s " % (cols[:-1], self.schema_origem,row))
+
+            # busca os dados
+           
+
+            # grava os dados no TXT
+            with open("output/%s.txt" % row, "w", newline='', encoding="latin-1", errors='ignore') as f:
+                w = csv.writer(
+                    f, delimiter='|', quotechar='"')
+                try:
+                    self.cur_origem.execute("select %s from %s.%s " % (cols[:-1], self.schema_origem,row))
+                    w.writerows(self.cur_origem.fetchall())
+                except Exception as e:
+                    self.erros.append(["%s" % row, e])
+                    end_time = time.time()
+                    end_datetime = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    print("\tFIM: %s\tTEMPO: %ss\tTABELA COM ERRO %s" %
+                          (end_datetime, round(end_time-start_time, 0), e))
+
+            # le o arquivo gravado e copia para o banco destino
+            with open("output/%s.txt" % row, "r", encoding="latin-1", errors='ignore') as f:
+                try:
+                    self.cur_destino.copy_expert(
+                        """COPY %s FROM STDIN WITH QUOTE '"' DELIMITER '|' NULL '' CSV """ % row, f)
+                except Exception as e:
+                    self.erros.append(["%s" % row, e])
+                    end_time = time.time()
+                    end_datetime = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    print("          FIM: %s\n          TEMPO: %ss\n          TABELA COM ERRO %s" %
+                          (end_datetime, round(end_time-start_time, 0), e))
+                else:
+                    end_time = time.time()
+                    end_datetime = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    print("          FIM: %s\n          TEMPO: %ss\n          OK" %
+                          (end_datetime, round(end_time-start_time, 0)))
+        end = time.time()
+        print("TEMPO GASTO: %s s" % (end-start))
+
+    def printa_erros(self):
+        """ retorna os erros encontrados durante a migracao """
+        for cada in self.erros:
+            print( "%s\t%s\n--------------------------------------\n" % (
+                cada[0], cada[1]))
+
+    def ddl_table(self, tabela):
+        """ gera o ddl (create table e tipos das colunas)"""
+        sql = """SELECT COLUMN_NAME as coluna, 
+	                    CASE DATA_TYPE
+	                    WHEN 'uniqueidentifier' THEN 'varchar'
+                        WHEN 'datetime' THEN 'timestamp'    
+                        WHEN 'varbinary' THEN 'bytea'
+                        WHEN 'char' THEN 'varchar'
+                        WHEN 'nvarchar' THEN 'varchar'
+                        WHEN 'image'THEN 'bytea'
+                        WHEN 'bit'THEN 'boolean'
+	                    ELSE DATA_TYPE END AS tipo, 
+	                    ORDINAL_POSITION as column_id, 
+	                    DATA_TYPE
+                   FROM INFORMATION_SCHEMA.COLUMNS
+                  WHERE TABLE_NAME = '%s'
+                  ORDER BY ORDINAL_POSITION""" % (tabela)
+        res = self.cur_origem.execute(sql)
+        table = "CREATE TABLE IF NOT EXISTS %s (" % tabela
+        tipos = {}
+        for coluna, tipo, id, data_type, in res.fetchall():
+            # print('"%s,%s"'%(coluna,tipo))
+            if coluna == 'ROW_VERSION' or coluna == 'ROWVERSION':
+                continue
+            else:
+                col = coluna
+                table += "%s %s," % (col.strip(), tipo.strip())
+                if tipo == 'bytea':
+                    if data_type == 'image':
+                        coluna = 'CONVERT(VARCHAR(1000), cast(%s as varbinary(max)), 2)' % coluna
+                    else:    
+                        coluna = 'CONVERT(VARCHAR(1000), %s, 2)' % coluna
+                tipos[id] = [coluna.strip(), data_type]
+        table = table[:-1]+");"
+        return table, tipos
+
+
+class migrador_oracle:
+    def __init__(self, tabela):
+        # dados da conexao de entrada
+        self.user_origem = "user"
+        self.senha_origem = "senha"
+        self.host_origem = "localhost"
+        self.database_origem = "ORCL"
+        self.schema_origem = "schema"
+
+        # dados da conexao de saida
+        self.user_destino = "postgres"
+        self.senha_destino = "postgres"
+        self.host_destino = "10.0.18.70"
+        self.database_destino = "db"
         self.porta_destino = 5433
 
         self.erros = []
@@ -232,8 +389,8 @@ class migrador_oracle:
             count, = countsql.fetchall()[0]
             start_time = time.time()
             start_datetime = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            print "MIGRANDO: %s\n          NRO REGISTROS: %s registros\n          INICIO: %s" % (
-                row, count, start_datetime)
+            print("MIGRANDO: %s\n          NRO REGISTROS: %s registros\n          INICIO: %s" % (
+                row, count, start_datetime))
 
             # gera o create table e trunca a tabela ( se ja existir )
             create, tipos = self.ddl_table(row)
@@ -301,8 +458,8 @@ class migrador_oracle:
     def printa_erros(self):
         """ retorna os erros encontrados durante a migracao """
         for cada in self.erros:
-            print "%s\t%s\n--------------------------------------\n" % (
-                cada[0], cada[1])
+            print( "%s\t%s\n--------------------------------------\n" % (
+                cada[0], cada[1]))
 
     def ddl_table(self, tabela):
         """ gera o ddl (create table e tipos das colunas)"""
@@ -363,6 +520,8 @@ class migrador:
             return migrador_oracle(self.tabela)
         elif self.tipo == "firebird":
             return migrador_firebird(self.tabela)
+        elif self.tipo == "mssql":
+            return migrador_mssql(self.tabela)
 
 
 if __name__ == "__main__":
@@ -382,7 +541,8 @@ if __name__ == "__main__":
     """ SELECIONAR A ORIGEM A SER MIGRADA """
     # instancia a classe migradora
     # migrador = migrador("oracle", tabela)  # oracle , firebird
-    migrador = migrador("firebird", tabela)  # oracle , firebird
+    # migrador = migrador("firebird", tabela)  # oracle , firebird
+    migrador = migrador("mssql", tabela)  # oracle , firebird, mssql
 
     migrar = migrador.start()
 
@@ -391,24 +551,32 @@ if __name__ == "__main__":
     migrar.user_destino = "postgres"
     migrar.senha_destino = "postgres"
     migrar.host_destino = "10.0.18.70"
-    migrar.database_destino = "jaguaracu_memory"
+    migrar.database_destino = "db"
     migrar.porta_destino = 5433
 
     """ COFIGURAR BANCO DE DADOS DE SAIDA """
     # dados da conexao de entrada (origem)
 
     # EXEMPLO ORACLE
-    # migrar.user_origem = "PMJ"
-    # migrar.senha_origem = "PMJ"
+    # migrar.user_origem = "user"
+    # migrar.senha_origem = "senha"
     # migrar.host_origem = "localhost"
     # migrar.database_origem = "ORCL"
-    # migrar.schema_origem = "PMJ"
+    # migrar.schema_origem = "schema"
 
     # EXEMPLO FIREBIRD
-    migrar.host_origem = 'localhost'
-    migrar.database_origem = 'C:/Users/dabes/Downloads/dbjaguaracu.fdb'
-    migrar.user_origem = 'SYSDBA'
-    migrar.senha_origem = 'masterkey'
+    # migrar.host_origem = 'localhost'
+    # migrar.database_origem = 'C:/Users/dabes/Downloads/db.fdb'
+    # migrar.user_origem = 'SYSDBA'
+    # migrar.senha_origem = 'senha'
+
+    # EXEMPLO MSSQL
+    # migrar.user_origem = "sa"
+    # migrar.senha_origem = "senha"
+    # migrar.host_origem = "localhost"
+    # migrar.database_origem = "db"
+    # migrar.schema_origem = "dbo"
+
 
     """ INICIA AS CONEXOES E MIGRA AO FINAL RETORNA OS ERROS """
     # conecta aos bancos origem e destino
@@ -417,3 +585,4 @@ if __name__ == "__main__":
     migrar.migrar()
     # imprime os erros encontrados durante a migracao
     migrar.printa_erros()
+
